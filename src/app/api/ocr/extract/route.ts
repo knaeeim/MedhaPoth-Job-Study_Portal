@@ -1,0 +1,175 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+    const { imageBase64, mimeType = 'image/jpeg', apiKey: clientApiKey } = body;
+
+    if (!imageBase64) {
+      return NextResponse.json(
+        { error: 'কোনো ইমেজ ডাটা পাওয়া যায়নি!' },
+        { status: 400 }
+      );
+    }
+
+    const apiKey = clientApiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_KEY;
+
+    if (!apiKey) {
+      return NextResponse.json(
+        {
+          error: 'NO_API_KEY',
+          message: 'গুগল জেমিনাই (Gemini Vision) এপিআই কী প্রয়োজন। অনুগ্রহ করে আপনার ফ্রি জেমিনাই এপিআই কী দিন (aistudio.google.com থেকে সম্পূর্ণ ফ্রি পাওয়া যায়)।'
+        },
+        { status: 401 }
+      );
+    }
+
+    // Strip data URL prefix if present
+    const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+
+    const genAI = new GoogleGenerativeAI(apiKey);
+    
+    // Use gemini-2.5-flash or gemini-1.5-flash which has state-of-the-art Bengali and English vision OCR
+    const model = genAI.getGenerativeModel({
+      model: 'gemini-1.5-flash',
+      generationConfig: {
+        temperature: 0.1, // low temperature for maximum factual accuracy and verbatim OCR
+        maxOutputTokens: 8192
+      }
+    });
+
+    const prompt = `You are a world-class AI document OCR and exam question extraction expert specializing in Bangladeshi competitive exams (BCS Preliminary, Bank Recruitment, Primary Teacher, NTRCA, and Govt Jobs).
+
+You are given an image of a real question paper or guide book containing multiple multiple-choice questions (MCQs) in Bengali and/or English.
+
+YOUR MISSION:
+Carefully scan the ENTIRE image and extract EVERY SINGLE QUESTION visible. If there are 5, 10, 15, 17, or 20 questions, you must extract ALL of them! Do not omit or truncate any question.
+
+For each question found in the image, extract and structure it strictly into this JSON format:
+{
+  "question": "Full verbatim question text in Bengali or English (including question number if helpful)",
+  "options": [
+    "Option 1 text (e.g. ক এর বক্তব্য)",
+    "Option 2 text (e.g. খ এর বক্তব্য)",
+    "Option 3 text (e.g. গ এর বক্তব্য)",
+    "Option 4 text (e.g. ঘ এর বক্তব্য)"
+  ],
+  "correctAnswer": 0, // 0 for ক/A, 1 for খ/B, 2 for গ/C, 3 for ঘ/D. If an answer key or tick/circle is visible in the image, use it. Otherwise, solve the question accurately using expert academic knowledge.
+  "explanation": "Detailed explanation in Bengali explaining step-by-step why this answer is correct, with shortcut techniques and rules",
+  "subjectId": "one of: 'bangla', 'english', 'math', 'gk_bangladesh', 'gk_international'",
+  "topic": "Specific topic name (e.g. সন্ধি, সমাস, শতকরা, Preposition, মুক্তিযুদ্ধ ১৯৭১, জাতিসংঘ)",
+  "examSource": "Exam title if visible or 'ছবি থেকে স্ক্যানকৃত প্রশ্ন'",
+  "year": 2025,
+  "confidence": 98
+}
+
+SUBJECT CLASSIFICATION RULES:
+- 'bangla': Bengali language, grammar (ধ্বনি, বর্ণ, সন্ধি, সমাস, কারক, প্রত্যয়), Bengali literature.
+- 'english': English grammar, vocabulary, idioms, literature.
+- 'math': Arithmetic, algebra, geometry, percentage, profit-loss, mental ability.
+- 'gk_bangladesh': Bangladesh history, 1971 Liberation War, Constitution, geography, economy, mega projects.
+- 'gk_international': UN, international bodies, world politics, Nobel prize, treaties, global affairs.
+
+IMPORTANT OUTPUT FORMAT:
+Output ONLY a valid JSON array of question objects (e.g. [ { ... }, { ... } ]). Do NOT wrap with any explanatory text outside the JSON.`;
+
+    const imagePart = {
+      inlineData: {
+        data: cleanBase64,
+        mimeType: mimeType
+      }
+    };
+
+    let result;
+    try {
+      result = await model.generateContent([prompt, imagePart]);
+    } catch (modelErr: any) {
+      // Fallback to gemini-1.5-pro if flash fails
+      try {
+        const fallbackModel = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
+        result = await fallbackModel.generateContent([prompt, imagePart]);
+      } catch (fallbackErr: any) {
+        throw modelErr;
+      }
+    }
+
+    const responseText = result.response.text();
+    
+    // Parse JSON safely from response text
+    let parsedQuestions = [];
+    try {
+      // Remove any markdown ```json ... ``` wrapper
+      let cleanedJson = responseText.trim();
+      if (cleanedJson.startsWith('```json')) {
+        cleanedJson = cleanedJson.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+      } else if (cleanedJson.startsWith('```')) {
+        cleanedJson = cleanedJson.replace(/^```\s*/, '').replace(/\s*```$/, '');
+      }
+
+      parsedQuestions = JSON.parse(cleanedJson);
+    } catch (parseErr) {
+      // Attempt regex extraction of JSON array
+      const match = responseText.match(/\[\s*\{[\s\S]*\}\s*\]/);
+      if (match) {
+        parsedQuestions = JSON.parse(match[0]);
+      } else {
+        return NextResponse.json(
+          {
+            error: 'PARSE_ERROR',
+            message: 'ইমেজ থেকে টেক্সট পাওয়া গেছে কিন্তু সঠিক প্রশ্ন ফরম্যাটে রূপান্তর করা যায়নি।',
+            rawText: responseText
+          },
+          { status: 500 }
+        );
+      }
+    }
+
+    if (!Array.isArray(parsedQuestions) || parsedQuestions.length === 0) {
+      return NextResponse.json(
+        { error: 'NO_QUESTIONS_FOUND', message: 'ছবিতে কোনো প্রশ্ন সনাক্ত করা যায়নি। অনুগ্রহ করে পরিষ্কার ও সোজা ছবি দিন।' },
+        { status: 404 }
+      );
+    }
+
+    // Format questions with IDs and validate fields
+    const formattedQuestions = parsedQuestions.map((q: any, idx: number) => ({
+      id: `ocr-${Date.now()}-${idx}`,
+      question: String(q.question || `প্রশ্ন ${idx + 1}`),
+      options: Array.isArray(q.options) && q.options.length >= 4 
+        ? q.options.slice(0, 4).map(String)
+        : Array.isArray(q.options) && q.options.length > 0
+        ? [...q.options.map(String), 'অপশন খ', 'অপশন গ', 'অপশন ঘ'].slice(0, 4)
+        : ['অপশন ক', 'অপশন খ', 'অপশন গ', 'অপশন ঘ'],
+      correctAnswer: typeof q.correctAnswer === 'number' && q.correctAnswer >= 0 && q.correctAnswer <= 3 
+        ? q.correctAnswer 
+        : 0,
+      explanation: String(q.explanation || 'সঠিক উত্তরের বিশদ শর্টকাট ব্যাখ্যা।'),
+      subjectId: ['bangla', 'english', 'math', 'gk_bangladesh', 'gk_international'].includes(q.subjectId)
+        ? q.subjectId
+        : 'bangla',
+      topic: String(q.topic || 'সাধারণ'),
+      examSource: String(q.examSource || 'ছবি থেকে স্ক্যানকৃত'),
+      year: Number(q.year) || 2025,
+      confidence: Number(q.confidence) || 95,
+      tags: ['AI_OCR', String(q.subjectId || 'bangla')],
+      selected: true
+    }));
+
+    return NextResponse.json({
+      success: true,
+      count: formattedQuestions.length,
+      questions: formattedQuestions
+    });
+
+  } catch (error: any) {
+    console.error('OCR Extraction API Error:', error);
+    return NextResponse.json(
+      {
+        error: 'SERVER_ERROR',
+        message: error.message || 'ইমেজ প্রসেসিং করতে সমস্যা হয়েছে। আপনার এপিআই কী ও ইন্টারনেট সংযোগ যাচাই করুন।'
+      },
+      { status: 500 }
+    );
+  }
+}
