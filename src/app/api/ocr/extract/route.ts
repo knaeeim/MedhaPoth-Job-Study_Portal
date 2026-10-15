@@ -1,5 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+
+interface QuestionExtractionResult {
+  question: string;
+  options: string[];
+  correctAnswer: number;
+  explanation: string;
+  subjectId: string;
+  topic: string;
+  examSource: string;
+  year: number;
+  confidence: number;
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -25,21 +36,50 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Strip data URL prefix if present
+    // Clean base64
     const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
 
-    const genAI = new GoogleGenerativeAI(apiKey);
-    
-    // Use gemini-2.5-flash or gemini-1.5-flash which has state-of-the-art Bengali and English vision OCR
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-1.5-flash',
-      generationConfig: {
-        temperature: 0.1, // low temperature for maximum factual accuracy and verbatim OCR
-        maxOutputTokens: 8192
-      }
-    });
+    // 1. DYNAMIC MODEL DISCOVERY: Find valid models enabled for this API key
+    let candidateModels: string[] = [];
+    try {
+      const listRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
+        { method: 'GET', headers: { 'Content-Type': 'application/json' } }
+      );
 
-    const prompt = `You are a world-class AI document OCR and exam question extraction expert specializing in Bangladeshi competitive exams (BCS Preliminary, Bank Recruitment, Primary Teacher, NTRCA, and Govt Jobs).
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        if (Array.isArray(listData.models)) {
+          const contentModels = listData.models
+            .filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'))
+            .map((m: any) => m.name.replace(/^models\//, ''));
+
+          // Sort prioritizing fast multimodal models
+          const flashModels = contentModels.filter((m: string) => m.includes('flash'));
+          const proModels = contentModels.filter((m: string) => m.includes('pro') && !m.includes('flash'));
+          const otherModels = contentModels.filter((m: string) => !m.includes('flash') && !m.includes('pro'));
+
+          candidateModels = [...flashModels, ...proModels, ...otherModels];
+        }
+      }
+    } catch (discoveryErr) {
+      console.warn('Dynamic model discovery failed, falling back to static list:', discoveryErr);
+    }
+
+    // Fallback candidate list if discovery returned nothing
+    if (candidateModels.length === 0) {
+      candidateModels = [
+        'gemini-1.5-flash-latest',
+        'gemini-1.5-flash',
+        'gemini-1.5-pro-latest',
+        'gemini-1.5-pro',
+        'gemini-2.0-flash',
+        'gemini-2.0-flash-exp',
+        'gemini-2.5-flash'
+      ];
+    }
+
+    const promptText = `You are a world-class AI document OCR and exam question extraction expert specializing in Bangladeshi competitive exams (BCS Preliminary, Bank Recruitment, Primary Teacher, NTRCA, and Govt Jobs).
 
 You are given an image of a real question paper or guide book containing multiple multiple-choice questions (MCQs) in Bengali and/or English.
 
@@ -48,7 +88,7 @@ Carefully scan the ENTIRE image and extract EVERY SINGLE QUESTION visible. If th
 
 For each question found in the image, extract and structure it strictly into this JSON format:
 {
-  "question": "Full verbatim question text in Bengali or English (including question number if helpful)",
+  "question": "Full verbatim question text in Bengali or English (including question number if present)",
   "options": [
     "Option 1 text (e.g. ক এর বক্তব্য)",
     "Option 2 text (e.g. খ এর বক্তব্য)",
@@ -71,45 +111,87 @@ SUBJECT CLASSIFICATION RULES:
 - 'gk_bangladesh': Bangladesh history, 1971 Liberation War, Constitution, geography, economy, mega projects.
 - 'gk_international': UN, international bodies, world politics, Nobel prize, treaties, global affairs.
 
-IMPORTANT OUTPUT FORMAT:
-Output ONLY a valid JSON array of question objects (e.g. [ { ... }, { ... } ]). Do NOT wrap with any explanatory text outside the JSON.`;
+IMPORTANT: Output ONLY a valid JSON array of question objects (e.g. [ { ... }, { ... } ]). Do NOT output markdown code blocks outside JSON.`;
 
-    const imagePart = {
-      inlineData: {
-        data: cleanBase64,
-        mimeType: mimeType
-      }
-    };
+    let responseText: string | null = null;
+    let successfulModel: string | null = null;
+    let lastErrorDetails: any = null;
 
-    let result;
-    try {
-      result = await model.generateContent([prompt, imagePart]);
-    } catch (modelErr: any) {
-      // Fallback to gemini-1.5-pro if flash fails
+    // 2. Try models sequentially until one succeeds
+    for (const modelName of candidateModels) {
       try {
-        const fallbackModel = genAI.getGenerativeModel({ model: 'gemini-1.5-pro' });
-        result = await fallbackModel.generateContent([prompt, imagePart]);
-      } catch (fallbackErr: any) {
-        throw modelErr;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+        
+        const payload = {
+          contents: [
+            {
+              parts: [
+                { text: promptText },
+                {
+                  inlineData: {
+                    mimeType: mimeType,
+                    data: cleanBase64
+                  }
+                }
+              ]
+            }
+          ],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 8192
+          }
+        };
+
+        const apiRes = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (apiRes.ok) {
+          const resData = await apiRes.json();
+          const candidate = resData.candidates?.[0];
+          const partText = candidate?.content?.parts?.[0]?.text;
+          if (partText) {
+            responseText = partText;
+            successfulModel = modelName;
+            break; // Success!
+          }
+        } else {
+          const errData = await apiRes.json().catch(() => ({}));
+          lastErrorDetails = errData;
+          // If 404 or unsupported, continue to next model candidate
+          console.warn(`Model ${modelName} returned status ${apiRes.status}, trying next...`);
+        }
+      } catch (err: any) {
+        lastErrorDetails = err;
+        console.warn(`Error attempting model ${modelName}:`, err.message);
       }
     }
 
-    const responseText = result.response.text();
-    
-    // Parse JSON safely from response text
-    let parsedQuestions = [];
+    if (!responseText) {
+      const errMsg = lastErrorDetails?.error?.message || 'আপনার এপিআই কী-এর জন্য কোনো সক্রিয় ভিশন মডেল পাওয়া যায়নি।';
+      return NextResponse.json(
+        {
+          error: 'MODEL_UNAVAILABLE',
+          message: `গুগল জেমিনাই এরর: ${errMsg}। অনুগ্রহ করে aistudio.google.com থেকে নতুন একটি ফ্রি API Key তৈরি করে দিন।`
+        },
+        { status: 500 }
+      );
+    }
+
+    // 3. PARSE JSON SAFELY
+    let parsedQuestions: QuestionExtractionResult[] = [];
     try {
-      // Remove any markdown ```json ... ``` wrapper
       let cleanedJson = responseText.trim();
       if (cleanedJson.startsWith('```json')) {
         cleanedJson = cleanedJson.replace(/^```json\s*/, '').replace(/\s*```$/, '');
       } else if (cleanedJson.startsWith('```')) {
         cleanedJson = cleanedJson.replace(/^```\s*/, '').replace(/\s*```$/, '');
       }
-
       parsedQuestions = JSON.parse(cleanedJson);
-    } catch (parseErr) {
-      // Attempt regex extraction of JSON array
+    } catch {
+      // Regex extraction fallback
       const match = responseText.match(/\[\s*\{[\s\S]*\}\s*\]/);
       if (match) {
         parsedQuestions = JSON.parse(match[0]);
@@ -118,7 +200,7 @@ Output ONLY a valid JSON array of question objects (e.g. [ { ... }, { ... } ]). 
           {
             error: 'PARSE_ERROR',
             message: 'ইমেজ থেকে টেক্সট পাওয়া গেছে কিন্তু সঠিক প্রশ্ন ফরম্যাটে রূপান্তর করা যায়নি।',
-            rawText: responseText
+            raw: responseText.slice(0, 500)
           },
           { status: 500 }
         );
@@ -132,7 +214,7 @@ Output ONLY a valid JSON array of question objects (e.g. [ { ... }, { ... } ]). 
       );
     }
 
-    // Format questions with IDs and validate fields
+    // 4. FORMAT AND VALIDATE ALL EXTRACTED QUESTIONS
     const formattedQuestions = parsedQuestions.map((q: any, idx: number) => ({
       id: `ocr-${Date.now()}-${idx}`,
       question: String(q.question || `প্রশ্ন ${idx + 1}`),
@@ -151,19 +233,20 @@ Output ONLY a valid JSON array of question objects (e.g. [ { ... }, { ... } ]). 
       topic: String(q.topic || 'সাধারণ'),
       examSource: String(q.examSource || 'ছবি থেকে স্ক্যানকৃত'),
       year: Number(q.year) || 2025,
-      confidence: Number(q.confidence) || 95,
+      confidence: Number(q.confidence) || 96,
       tags: ['AI_OCR', String(q.subjectId || 'bangla')],
       selected: true
     }));
 
     return NextResponse.json({
       success: true,
+      modelUsed: successfulModel,
       count: formattedQuestions.length,
       questions: formattedQuestions
     });
 
   } catch (error: any) {
-    console.error('OCR Extraction API Error:', error);
+    console.error('OCR Extraction API Global Error:', error);
     return NextResponse.json(
       {
         error: 'SERVER_ERROR',
