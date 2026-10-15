@@ -176,31 +176,31 @@ export function FlashcardGame({ flashcards, onCompleted }: FlashcardGameProps) {
       </div>
 
       {/* Response Action Buttons */}
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-3 gap-2 sm:gap-3">
         <button
           type="button"
           onClick={() => handleRating('hard')}
-          className="p-3 rounded-2xl bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-400 border border-rose-200 dark:border-rose-800 text-xs font-bold hover:bg-rose-100 dark:hover:bg-rose-900/50 transition flex flex-col items-center gap-1"
+          className="p-2.5 sm:p-3 rounded-2xl bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-400 border border-rose-200 dark:border-rose-800 text-[11px] sm:text-xs font-bold hover:bg-rose-100 dark:hover:bg-rose-900/50 transition flex flex-col items-center justify-center gap-1 text-center"
         >
-          <span>মনে পড়েনি (আবার চাই)</span>
+          <span>মনে পড়েনি</span>
           <span className="text-[10px] text-rose-500 font-normal">+৫ XP</span>
         </button>
 
         <button
           type="button"
           onClick={() => handleRating('medium')}
-          className="p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800 text-xs font-bold hover:bg-amber-100 dark:hover:bg-amber-900/50 transition flex flex-col items-center gap-1"
+          className="p-2.5 sm:p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800 text-[11px] sm:text-xs font-bold hover:bg-amber-100 dark:hover:bg-amber-900/50 transition flex flex-col items-center justify-center gap-1 text-center"
         >
-          <span>মাঝারি (ভেবে বলেছি)</span>
+          <span>মাঝারি</span>
           <span className="text-[10px] text-amber-500 font-normal">+১০ XP</span>
         </button>
 
         <button
           type="button"
           onClick={() => handleRating('easy')}
-          className="p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 text-xs font-bold hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition flex flex-col items-center gap-1"
+          className="p-2.5 sm:p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 text-[11px] sm:text-xs font-bold hover:bg-emerald-100 dark:hover:bg-emerald-900/50 transition flex flex-col items-center justify-center gap-1 text-center"
         >
-          <span>একদম সহজ (মনে ছিল)</span>
+          <span>একদম সহজ</span>
           <span className="text-[10px] text-emerald-500 font-normal">+১৫ XP</span>
         </button>
       </div>

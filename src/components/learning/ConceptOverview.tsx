@@ -52,7 +52,7 @@ export function ConceptOverview({ topic, onBack }: ConceptOverviewProps) {
           </div>
 
           {/* Mode Selector Tabs */}
-          <div className="flex items-center gap-1.5 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl shrink-0">
+          <div className="flex items-center gap-1.5 p-1 bg-slate-100 dark:bg-slate-800 rounded-xl shrink-0 overflow-x-auto max-w-full">
             <button
               type="button"
               onClick={() => setActiveTab('concept')}
